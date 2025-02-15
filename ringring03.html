@@ -1,0 +1,309 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset='utf-8'>
+  <meta name='viewport' content='width=device-width, initial-scale=1, user-scalable=no'>
+  <meta name='mobile-web-app-capable' content='yes'>
+  <meta name='apple-mobile-web-app-capable' content='yes'>
+  <link rel='icon' type='image/png' sizes='32x32' href='favicon-32x32.png'>
+  <link rel='icon' type='image/png' sizes='96x96' href='favicon-96x96.png'>
+  <title>Simple VR App</title>
+  <style>
+    body { margin: 0; display: flex; justify-content: center; align-items: center; height: 100vh; background-color: #f0f0f0; }
+    canvas { display: block; }
+    #vrButton {
+      padding: 20px 40px;
+      font-size: 24px;
+      background-color: #0078d7;
+      color: white;
+      border: none;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: background-color 0.3s ease;
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+    }
+    #vrButton:hover {
+      background-color: #005bb5;
+    }
+  </style>
+</head>
+<body>
+  <button id="vrButton">Enter VR</button>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.module.js",
+        "three/examples/jsm/webxr/VRButton.js": "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/jsm/webxr/VRButton.js",
+        "three/examples/jsm/webxr/XRControllerModelFactory.js": "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/jsm/webxr/XRControllerModelFactory.js"
+      }
+    }
+  </script>
+  <script type="module">
+    import * as THREE from 'three';
+    import { VRButton } from 'three/examples/jsm/webxr/VRButton.js';
+
+    let camera, scene, renderer;
+    let controller1, controller2;
+    let sphere1, sphere2;
+    let ring, textMesh, timerMesh;
+    let cubeBox, sphereBox1, sphereBox2;
+    let grabbed = false;
+    let grabbingController = null;
+    let grabOffset = new THREE.Vector3();
+    let grabRotationOffset = new THREE.Quaternion();
+    let startTime = null;
+    let elapsedTime = 0;
+    let font;
+
+    init();
+    animate();
+
+    function init() {
+      // Basic Three.js setup
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 1000);
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.xr.enabled = true;
+      document.body.appendChild(renderer.domElement);
+
+      // Add light
+      const light = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1);
+      light.position.set(0.5, 1, 0.25);
+      scene.add(light);
+
+      // Add 3D ring to the scene
+      const ringGeometry = new THREE.TorusGeometry(0.075, 0.00625, 16, 100);
+      const ringMaterial = new THREE.MeshStandardMaterial({
+        color: 0x00ff00, // Green
+        emissive: 0x00ff00, // Green emissive
+        emissiveIntensity: 1.0,
+        metalness: 1.0,
+        roughness: 0.0
+      });
+      ring = new THREE.Mesh(ringGeometry, ringMaterial);
+      ring.position.set(0, 1.5, -0.5); // Move the ring closer to the player
+      ring.rotation.y = Math.PI / 2; // Rotate the ring 90 degrees on the vertical axis
+      scene.add(ring);
+
+      // Initialize bounding boxes
+      cubeBox = new THREE.Box3().setFromObject(ring);
+
+      // Add text above the ring
+      const loader = new THREE.FontLoader();
+      loader.load('https://threejs.org/examples/fonts/helvetiker_regular.typeface.json', function (loadedFont) {
+        font = loadedFont;
+        const textGeometry = new THREE.TextGeometry('LEVEL 1', {
+          font: font,
+          size: 0.02,
+          height: 0.005,
+        });
+        const textMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff });
+        textMesh = new THREE.Mesh(textGeometry, textMaterial);
+        textGeometry.computeBoundingBox();
+        const centerOffset = -0.5 * (textGeometry.boundingBox.max.x - textGeometry.boundingBox.min.x);
+        textMesh.position.set(centerOffset, 2.0, -0.5); // Position text above the ring
+        scene.add(textMesh);
+
+        // Add timer text below the level text
+        const timerGeometry = new THREE.TextGeometry('00:000', {
+          font: font,
+          size: 0.02,
+          height: 0.005,
+        });
+        const timerMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff });
+        timerMesh = new THREE.Mesh(timerGeometry, timerMaterial);
+        timerGeometry.computeBoundingBox();
+        const timerCenterOffset = -0.5 * (timerGeometry.boundingBox.max.x - timerGeometry.boundingBox.min.x);
+        timerMesh.position.set(timerCenterOffset, 1.8, -0.5); // Position timer below the level text
+        scene.add(timerMesh);
+      });
+
+      // Add spheres as controllers
+      const sphereGeometry = new THREE.SphereGeometry(0.05, 32, 32);
+      const sphereMaterial = new THREE.MeshStandardMaterial({ color: 0x0078d7, transparent: true, opacity: 0.5 });
+
+      sphere1 = new THREE.Mesh(sphereGeometry, sphereMaterial);
+      scene.add(sphere1);
+
+      sphere2 = new THREE.Mesh(sphereGeometry, sphereMaterial);
+      scene.add(sphere2);
+
+      // Initialize bounding spheres for spheres
+      sphereBox1 = new THREE.Sphere(sphere1.position, 0.05);
+      sphereBox2 = new THREE.Sphere(sphere2.position, 0.05);
+
+      // Add controllers
+      controller1 = renderer.xr.getController(0);
+      controller1.addEventListener('selectstart', onSelectStart);
+      controller1.addEventListener('selectend', onSelectEnd);
+      controller1.addEventListener('squeezestart', onSelectStart);
+      controller1.addEventListener('squeezeend', onSelectEnd);
+      scene.add(controller1);
+
+      controller2 = renderer.xr.getController(1);
+      controller2.addEventListener('selectstart', onSelectStart);
+      controller2.addEventListener('selectend', onSelectEnd);
+      controller2.addEventListener('squeezestart', onSelectStart);
+      controller2.addEventListener('squeezeend', onSelectEnd);
+      scene.add(controller2);
+
+      window.addEventListener('resize', onWindowResize, false);
+
+      // VR Button
+      const vrButton = document.getElementById('vrButton');
+      vrButton.addEventListener('click', async () => {
+        try {
+          const session = await navigator.xr.requestSession('immersive-vr', {
+            optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking']
+          });
+          renderer.xr.setSession(session);
+          vrButton.style.display = 'none';
+          console.log('VR Button clicked');
+        } catch (error) {
+          console.error('Failed to enter VR:', error);
+        }
+      });
+
+      // Add some floating particles for ambiance
+      const particlesGeometry = new THREE.BufferGeometry();
+      const particlesCount = 3000;
+      const posArray = new Float32Array(particlesCount * 3);
+      for (let i = 0; i < particlesCount * 3; i += 3) {
+        // Generate position
+        let x = (Math.random() - 0.5) * 100;
+        let y = (Math.random() - 0.5) * 100;
+        let z = (Math.random() - 0.5) * 100;
+
+        posArray[i] = x;
+        posArray[i + 1] = y;
+        posArray[i + 2] = z;
+      }
+
+      particlesGeometry.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+      const particlesMaterial = new THREE.PointsMaterial({
+        size: 0.2,
+        color: 0x00ffff,
+        transparent: true,
+        opacity: 0.8,
+        blending: THREE.AdditiveBlending
+      });
+
+      const particlesMesh = new THREE.Points(particlesGeometry, particlesMaterial);
+      scene.add(particlesMesh);
+    }
+
+    function onWindowResize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    function updateBoundingBoxes() {
+      cubeBox.setFromObject(ring);
+      sphereBox1.set(sphere1.position, 0.05);
+      sphereBox2.set(sphere2.position, 0.05);
+    }
+
+    function checkCollision() {
+      if (cubeBox.intersectsSphere(sphereBox1) || cubeBox.intersectsSphere(sphereBox2)) {
+        console.log('Collision detected');
+      }
+    }
+
+    function onSelectStart(event) {
+      if (cubeBox.intersectsSphere(sphereBox1) && event.target === controller1) {
+        grabbed = true;
+        grabbingController = controller1;
+        grabOffset.copy(ring.position).sub(controller1.position);
+        grabRotationOffset.copy(controller1.quaternion).invert().multiply(ring.quaternion);
+        if (startTime === null) {
+          startTime = Date.now() - elapsedTime;
+        }
+      } else if (cubeBox.intersectsSphere(sphereBox2) && event.target === controller2) {
+        grabbed = true;
+        grabbingController = controller2;
+        grabOffset.copy(ring.position).sub(controller2.position);
+        grabRotationOffset.copy(controller2.quaternion).invert().multiply(ring.quaternion);
+        if (startTime === null) {
+          startTime = Date.now() - elapsedTime;
+        }
+      }
+    }
+
+    function onSelectEnd(event) {
+      if (event.target === grabbingController) {
+        grabbed = false;
+        grabbingController = null;
+      }
+    }
+
+    function animate() {
+      renderer.setAnimationLoop(render);
+    }
+
+    function render() {
+      // Update sphere positions to match controller positions
+      sphere1.position.copy(controller1.position);
+      sphere2.position.copy(controller2.position);
+
+      // Update bounding boxes and check for collisions
+      updateBoundingBoxes();
+      checkCollision();
+
+      // Move ring with the grabbing controller while maintaining the offset
+      if (grabbed && grabbingController) {
+        ring.position.copy(grabbingController.position).add(grabOffset);
+        ring.quaternion.copy(grabbingController.quaternion).multiply(grabRotationOffset); // Update ring rotation to match controller rotation
+
+        // Hide the spheres when the ring is grabbed
+        sphere1.visible = false;
+        sphere2.visible = false;
+      } else {
+        // Show the spheres when the ring is not grabbed
+        sphere1.visible = true;
+        sphere2.visible = true;
+      }
+
+      // Keep the text and timer above the ring and billboarded to face the player
+      textMesh.position.set(ring.position.x, ring.position.y + 0.2, ring.position.z);
+      textMesh.geometry.computeBoundingBox();
+      const centerOffset = -0.5 * (textMesh.geometry.boundingBox.max.x - textMesh.geometry.boundingBox.min.x);
+      textMesh.position.x += centerOffset;
+      textMesh.lookAt(camera.position);
+
+      // Update timer
+      if (startTime !== null) {
+        elapsedTime = Date.now() - startTime;
+        const milliseconds = Math.floor(elapsedTime % 1000);
+        const seconds = Math.floor((elapsedTime / 1000) % 60);
+        const timerText = `${seconds.toString().padStart(2, '0')}:${milliseconds.toString().padStart(3, '0')}`;
+
+        // Update timer text
+        const timerGeometry = new THREE.TextGeometry(timerText, {
+          font: font,
+          size: 0.02,
+          height: 0.005,
+        });
+        timerMesh.geometry.dispose();
+        timerMesh.geometry = timerGeometry;
+        timerMesh.geometry.computeBoundingBox();
+        const timerCenterOffset = -0.5 * (timerMesh.geometry.boundingBox.max.x - timerMesh.geometry.boundingBox.min.x);
+        timerMesh.position.set(ring.position.x + timerCenterOffset, ring.position.y + 0.1, ring.position.z);
+        timerMesh.lookAt(camera.position);
+      }
+
+      // Ensure timer text stays attached to the ring and faces the player
+      timerMesh.position.set(ring.position.x, ring.position.y + 0.15, ring.position.z);
+      const timerCenterOffset = -0.5 * (timerMesh.geometry.boundingBox.max.x - timerMesh.geometry.boundingBox.min.x);
+      timerMesh.position.x += timerCenterOffset;
+      timerMesh.lookAt(camera.position);
+
+      renderer.render(scene, camera);
+    }
+  </script>
+</body>
+</html>
